@@ -510,6 +510,109 @@ class TournamentsCog(commands.Cog):
             log.error("Hiba a tournamentresultpost parancsnál: %s", exc)
             await interaction.followup.send(f"❌ Hiba történt: `{exc}`", ephemeral=True)
 
+    @app_commands.command(
+        name="tournamentcreatematch",
+        description="Kézzel létrehoz egy meccs ticketet két konkrét játékos között.",
+    )
+    @app_commands.describe(
+        tournament_id="A bajnokság UUID-ja",
+        round_number="A forduló száma, amelyikhez a meccs tartozik",
+        player1="1. játékos",
+        player2="2. játékos",
+    )
+    async def tournamentcreatematch(
+        self,
+        interaction: discord.Interaction,
+        tournament_id: str,
+        round_number: int,
+        player1: discord.Member,
+        player2: discord.Member,
+    ):
+        try:
+            await interaction.response.defer(ephemeral=True)
+
+            if player1.id == player2.id:
+                await interaction.followup.send("❌ A két játékos nem lehet ugyanaz a személy!", ephemeral=True)
+                return
+
+            tourney = await arun(db.get_tournament, tournament_id)
+            if not tourney:
+                await interaction.followup.send("❌ Nem található bajnokság ezzel az ID-val!", ephemeral=True)
+                return
+
+            guild = interaction.guild
+            if not guild:
+                await interaction.followup.send("❌ Ez a parancs csak szerveren belül használható!", ephemeral=True)
+                return
+
+            p1_id, p1_mc = await self._get_player_info(player1.id)
+            p2_id, p2_mc = await self._get_player_info(player2.id)
+
+            category_id = tourney.get("ticket_category_id") or config.ticket_category_id
+            category = guild.get_channel(category_id) if category_id else None
+            if not isinstance(category, discord.CategoryChannel):
+                await interaction.followup.send("❌ Nem található a ticket kategória!", ephemeral=True)
+                return
+
+            deadline_ts = int((datetime.now(timezone.utc) + timedelta(hours=MATCH_DEADLINE_HOURS)).timestamp())
+
+            ticket_channel = None
+            if len(category.channels) < 50:
+                try:
+                    overwrites = {
+                        guild.default_role: discord.PermissionOverwrite(read_messages=False, send_messages=False),
+                        guild.me: discord.PermissionOverwrite(read_messages=True, send_messages=True, manage_channels=True),
+                        player1: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                        player2: discord.PermissionOverwrite(read_messages=True, send_messages=True),
+                    }
+
+                    clean_p1 = "".join(c for c in p1_mc if c.isalnum() or c in "-_")
+                    clean_p2 = "".join(c for c in p2_mc if c.isalnum() or c in "-_")
+
+                    ticket_channel = await category.create_text_channel(
+                        name=f"r{round_number}-{clean_p1[:8]}-vs-{clean_p2[:8]}",
+                        overwrites=overwrites,
+                    )
+                except discord.HTTPException as exc:
+                    log.error("Discord API Hiba a manuális ticket létrehozásakor: %s", exc)
+                    await interaction.followup.send(f"❌ Nem sikerült létrehozni a csatornát: `{exc}`", ephemeral=True)
+                    return
+            else:
+                await interaction.followup.send("❌ A ticket kategória megtelt (max 50 csatorna)!", ephemeral=True)
+                return
+
+            match_data = await arun(
+                db.create_match,
+                tournament_id=tournament_id,
+                round_number=round_number,
+                player1_discord_id=p1_id,
+                player2_discord_id=p2_id,
+                player1_mc=p1_mc,
+                player2_mc=p2_mc,
+                ticket_channel_id=ticket_channel.id,
+                deadline=deadline_ts,
+            )
+
+            content_text = (
+                f"<@{p1_id}> <@{p2_id}> elindult a meccsetek. Pingeljétek egymást is, hogy minél gyorsabban "
+                "le tudjátok játszani."
+            )
+            embed = build_ticket_embed(tourney, match_data)
+            sent = await ticket_channel.send(
+                content=content_text,
+                embed=embed,
+                view=MatchTicketView(match_data, tourney),
+            )
+            await arun(db.set_match_ticket_message, match_data["id"], sent.id)
+
+            await interaction.followup.send(
+                f"✅ Meccs ticket létrehozva: {ticket_channel.mention} ({p1_mc} vs {p2_mc})",
+                ephemeral=True,
+            )
+        except Exception as exc:
+            log.error("Hiba a tournamentcreatematch parancsnál: %s", exc)
+            await interaction.followup.send(f"❌ Hiba történt: `{exc}`", ephemeral=True)
+
     @app_commands.command(name="tournamentround", description="Forduló kézi indítása vagy kezelése.")
     @app_commands.choices(action=[
         app_commands.Choice(name="start", value="start"),
