@@ -305,6 +305,10 @@ class TournamentsCog(commands.Cog):
         shuffled = players.copy()
         random.shuffle(shuffled)
 
+        bye_player = None
+        if len(shuffled) % 2 == 1:
+            bye_player = shuffled.pop()
+
         await arun(db.update_tournament, tourney_id, status="running", current_round=round_num)
         tourney = {**tourney, "status": "running", "current_round": round_num}
 
@@ -315,6 +319,33 @@ class TournamentsCog(commands.Cog):
         deadline_ts = int((datetime.now(timezone.utc) + timedelta(hours=MATCH_DEADLINE_HOURS)).timestamp())
 
         created_matches = 0
+
+        if bye_player:
+            bye_id = _to_int(bye_player["discord_id"])
+            bye_mc = bye_player.get("minecraft_name") or f"Player_{bye_id}"
+            bye_match = await arun(
+                db.create_match,
+                tournament_id=tourney_id,
+                round_number=round_num,
+                player1_discord_id=bye_id,
+                player2_discord_id=0,
+                player1_mc=bye_mc,
+                player2_mc="BYE",
+                ticket_channel_id=0,
+                deadline=deadline_ts,
+            )
+            await arun(db.set_match_winner, bye_match["id"], bye_id, None, None, False)
+
+            results_channel_id = tourney.get("results_channel_id") or config.results_channel_id
+            if guild and results_channel_id:
+                ch = guild.get_channel(results_channel_id)
+                if isinstance(ch, discord.TextChannel):
+                    await ch.send(
+                        f"**{round_num}. kör**\n\n"
+                        f"`{bye_mc}` (<@{bye_id}>) párosítás nélkül, automatikusan továbbjutott "
+                        f"(páratlan létszám miatt)."
+                    )
+
         for i in range(0, len(shuffled) - 1, 2):
             p1 = shuffled[i]
             p2 = shuffled[i + 1]
@@ -379,7 +410,8 @@ class TournamentsCog(commands.Cog):
 
         await self._update_queue_message(tourney)
 
-        return f"✅ A(z) **{round_num}. forduló** elindult! ({created_matches} meccs/ticket létrehozva)."
+        bye_note = " (+1 bye)" if bye_player else ""
+        return f"✅ A(z) **{round_num}. forduló** elindult! ({created_matches} meccs/ticket létrehozva{bye_note})."
 
     # ==========================================
     # SLASH PARANCSOK
